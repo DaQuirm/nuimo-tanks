@@ -1,0 +1,228 @@
+<html>
+	<script src = 'sprites.js'></script>
+	<script>
+
+		var screen;
+
+		var SCREEN_SIZE = 9;
+
+		var Pixel = {
+			UNSET: 0,
+			SET:   1,
+			fromChar: {},
+			toChar: {}
+		};
+
+		Pixel.fromChar[' '] = Pixel.UNSET;
+		Pixel.fromChar['*'] = Pixel.SET;
+
+		Pixel.toChar[Pixel.UNSET] = ' ';
+		Pixel.toChar[Pixel.SET] = '*';
+
+		function resetScreen () {
+			screen = Array
+				.apply(null, new Array(SCREEN_SIZE * SCREEN_SIZE))
+				.map(function () { return Pixel.UNSET; });
+		}
+
+		function setPixel (row, column, value) {
+			screen[SCREEN_SIZE * row + column] = value;
+		}
+
+		function setScreen (string) {
+			for (var index = 0; index < string.length; index++) {
+				screen[index] = Pixel.fromChar[string[index]];
+			}
+		}
+
+		function setRect (row, col, width, height, string) {
+			var index = 0;
+			for (var r = row; r < row + height; r++) {
+				for (var c = col; c < col + width; c++) {
+					setPixel(r, c, Pixel.fromChar[string[index++]]);
+				}
+			}
+		}
+
+		function render () {
+			var string = screen
+				.map(function (pixel) {
+					return Pixel.toChar[pixel];
+				})
+				.join('');
+			ws.send(string);
+		}
+
+		function gameLoop () {
+			resetScreen();
+
+			var h = Math.floor(world.score / 100);
+			var d = Math.floor(world.score / 10) % 10;
+			var u = Math.floor(world.score % 10);
+
+			setRect(2, 0, 3, 5, Sprite.digits[h]);
+			setRect(2, 3, 3, 5, Sprite.digits[d]);
+			setRect(2, 6, 3, 5, Sprite.digits[u]);
+
+			if (world.mode === 'game') {
+				checkProjectileCollision();
+
+				setScreen(Sprite.tank[world.tank.angle]);
+
+				world.tank_projectiles.forEach(function (projectile) {
+					var row = 4 + directionMap[projectile.direction_angle].y * (projectile.stage + 2);
+					var col = 4 + directionMap[projectile.direction_angle].x * (projectile.stage + 2);
+					setPixel(row, col, Pixel.SET);
+				});
+
+				world.enemy_projectiles.forEach(function (projectile) {
+					var row = 4 + directionMap[projectile.direction_angle].y * (Math.ceil(projectile.stage) + 2);
+					var col = 4 + directionMap[projectile.direction_angle].x * (Math.ceil(projectile.stage) + 2);
+					setPixel(row, col, Pixel.SET);
+				});
+
+				updateTankProjectiles();
+				updateEnemyProjectiles();
+				updateEPTimer();
+			}
+
+			render();
+		}
+
+		var directionMap = {
+			0: { x: 0, y: -1 },
+			1: { x: 1, y: -1 },
+			2: { x: 1, y: 0 },
+			3: { x: 1, y: 1 },
+			4: { x: 0, y: 1 },
+			5: { x: -1, y: 1 },
+			6: { x: -1, y: 0 },
+			7: { x: -1, y: -1 }
+		};
+
+		var EP_speed = 0.2;
+		var EP_freq = 10;
+
+		var world = {
+			mode: 'game',
+			score: 0,
+
+			rotation: 0,
+
+			tank: {
+				angle: 0
+			},
+
+			EP_timer: 0,
+
+			enemy_projectiles: [],
+			tank_projectiles: []
+		};
+
+		function shoot() {
+			world.tank_projectiles.push({
+				stage: 0,
+				direction_angle: world.tank.angle
+			});
+		}
+
+		function updateTankProjectiles () {
+			world.tank_projectiles =
+				world.tank_projectiles.reduce(function (state, projectile) {
+					if (projectile.stage === 2) {
+						return state;
+					}
+					projectile.stage++;
+					return state.concat(projectile);
+				}, [])
+		}
+
+		function updateEnemyProjectiles () {
+			world.enemy_projectiles =
+				world.enemy_projectiles.reduce(function (state, projectile) {
+					if (projectile.stage <= 0) {
+						tankHit();
+						return state;
+					}
+					projectile.stage -= EP_speed;
+					return state.concat(projectile);
+				}, [])
+		}
+
+		function updateEPTimer () {
+			world.EP_timer++;
+			if (world.EP_timer >= Math.max(Math.ceil(EP_freq - world.score / 2), 2)) {
+				if (world.mode === 'game') {
+					enemyShoot();
+				}
+				world.EP_timer = 0;
+			}
+		}
+
+		function enemyShoot () {
+			world.enemy_projectiles.push({
+				stage: 2,
+				direction_angle: Math.floor(Math.random() * 8)
+			});
+		}
+
+		function tankHit () {
+			world.mode = 'score';
+			world.tank_projectiles = [];
+			world.enemy_projectiles = [];
+		}
+
+		function checkProjectileCollision () {
+			var pIndex = null;
+			world.enemy_projectiles = world.enemy_projectiles.filter(function (projectile) {
+				return !world.tank_projectiles.some(function (tankProjectile, index) {
+					if (tankProjectile.direction_angle === projectile.direction_angle) {
+						if (tankProjectile.stage >= projectile.stage) {
+							pIndex = index;
+							return true;
+						}
+						return false;
+					}
+					return false;
+				});
+			}, []);
+			if (pIndex !== null) {
+				world.score++;
+				world.tank_projectiles.splice(pIndex, 1);
+			}
+		}
+
+		var ws = new WebSocket('ws://localhost:8080/');
+
+		ws.onopen = function() {
+			resetScreen();
+			window.setInterval(gameLoop, 333);
+		}
+
+		ws.onmessage = function(event) {
+		  console.log('Received Nuimo event: ' + event.data);
+			var gesture = event.data.split(',');
+
+			switch (gesture[0]) {
+				case 'R':
+					var angle = parseInt(gesture[1], 10);
+					world.rotation = (world.rotation + angle + 2800) % 2800;
+					world.tank.angle = Math.floor((world.rotation / 1400 * 8) + 8) % 8;
+					// world.tank.angle = Math.floor((((world.tank.angle + angle / 1400 * 360) + 360) % 360) / 45);
+					break;
+
+				case 'B':
+					if (gesture[1] === '0') {
+						if (world.mode === 'game') {
+							shoot();
+						} else {
+							world.score = 0;
+							world.mode = 'game';
+						}
+					}
+			}
+		};
+
+	</script>
+
+</html>
